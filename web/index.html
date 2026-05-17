@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#101820" />
+    <title>Personal Remote</title>
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="stylesheet" href="/static/styles.css?v=2" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section id="loginView" class="login-view">
+        <div class="login-panel">
+          <h1>Personal Remote</h1>
+          <label class="field">
+            <span>密码</span>
+            <input id="passwordInput" type="password" autocomplete="current-password" inputmode="numeric" />
+          </label>
+          <button id="connectButton" class="primary-button" type="button">连接</button>
+          <p id="loginStatus" class="status-line"></p>
+        </div>
+      </section>
+
+      <section id="remoteView" class="remote-view" hidden>
+        <div class="top-bar">
+          <div>
+            <strong>Personal Remote</strong>
+            <span id="connectionStatus">已连接</span>
+          </div>
+          <button id="disconnectButton" class="icon-button" type="button" aria-label="断开">×</button>
+        </div>
+
+        <div id="screenPad" class="screen-pad">
+          <img id="screenImage" alt="Remote screen" draggable="false" />
+        </div>
+
+        <div class="control-bar">
+          <div class="segmented" role="tablist" aria-label="控制模式">
+            <button id="directModeButton" class="selected" type="button">直控</button>
+            <button id="touchpadModeButton" type="button">触控板</button>
+          </div>
+          <button id="rightClickButton" type="button">右键</button>
+          <button id="backspaceButton" type="button">Backspace</button>
+          <button id="spaceButton" type="button">Space</button>
+          <button id="imeSwitchButton" type="button">Ctrl+Space</button>
+          <button id="escButton" type="button">Esc</button>
+          <button id="enterButton" type="button">Enter</button>
+        </div>
+
+        <form id="textForm" class="text-bar">
+          <input id="textInput" type="text" autocomplete="off" placeholder="输入文字" />
+          <button type="submit">发送</button>
+        </form>
+      </section>
+    </main>
+    <script src="/static/app.js?v=5"></script>
+  </body>
+</html>
