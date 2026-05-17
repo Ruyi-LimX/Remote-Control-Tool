@@ -1,6 +1,6 @@
 # Personal Remote
 
-当传统控制软件(向日葵 or Todesk)不能用的时候可以用这个：电脑启动 Host，Android 手机打开电脑 IP，就能看实时画面并控制鼠标键盘。
+如果传统控制软件(向日葵 or Todesk)不能用的时候可以用这个：电脑启动 Host，Android 手机打开电脑 IP，就能看实时画面并控制鼠标键盘。
 
 ## 功能
 
