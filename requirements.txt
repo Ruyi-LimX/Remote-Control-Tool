@@ -1,0 +1,5 @@
+mss>=9.0.1
+pillow>=10.0.0
+pyautogui>=0.9.54
+pyperclip>=1.8.2
+python3-Xlib>=0.15
