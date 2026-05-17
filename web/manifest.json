@@ -1,0 +1,10 @@
+{
+  "name": "Personal Remote",
+  "short_name": "Remote",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#101820",
+  "theme_color": "#101820",
+  "orientation": "any",
+  "icons": []
+}
