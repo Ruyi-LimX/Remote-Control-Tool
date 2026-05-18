@@ -1,0 +1,273 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_DIR="${PERSONAL_REMOTE_DIR:-/home/limx/Desktop/GreatWork/remote}"
+PORT="${REMOTE_PORT:-7070}"
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/personal-remote"
+
+HOST_PID_FILE="$STATE_DIR/host.pid"
+TUNNEL_PID_FILE="$STATE_DIR/tunnel.pid"
+HOST_LOG="$STATE_DIR/host.log"
+TUNNEL_LOG="$STATE_DIR/tunnel.log"
+URL_FILE="$STATE_DIR/url"
+PASSWORD_FILE="$STATE_DIR/password"
+
+mkdir -p "$STATE_DIR"
+chmod 700 "$STATE_DIR"
+
+usage() {
+  cat <<EOF
+Usage:
+  remote          Start Personal Remote and print the public URL
+  remote status   Show current status
+  remote close    Stop Personal Remote
+  remote logs     Show recent logs
+
+Environment:
+  PERSONAL_REMOTE_DIR  Project path, default: $PROJECT_DIR
+  REMOTE_PORT          Local port, default: $PORT
+EOF
+}
+
+is_running() {
+  local pid_file="$1"
+  [[ -s "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null
+}
+
+find_cloudflared() {
+  if command -v cloudflared >/dev/null 2>&1; then
+    command -v cloudflared
+    return
+  fi
+  if [[ -x "$HOME/.local/bin/cloudflared" ]]; then
+    printf '%s\n' "$HOME/.local/bin/cloudflared"
+    return
+  fi
+  return 1
+}
+
+python_cmd() {
+  if [[ -x "$PROJECT_DIR/.venv/bin/python" ]]; then
+    printf '%s\n' "$PROJECT_DIR/.venv/bin/python"
+  else
+    command -v python3
+  fi
+}
+
+extract_password() {
+  awk '
+    /^Password:/ {
+      sub(/^Password:[[:space:]]*/, "", $0)
+      value = $0
+    }
+    END {
+      if (value) print value
+    }
+  ' "$HOST_LOG"
+}
+
+extract_url() {
+  grep -Eo 'https://[-a-z0-9]+\.trycloudflare\.com' "$TUNNEL_LOG" | tail -n 1 || true
+}
+
+wait_for_host() {
+  local i
+  for i in $(seq 1 40); do
+    if curl -fsS "http://127.0.0.1:$PORT/api/status" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
+wait_for_tunnel_url() {
+  local i url
+  for i in $(seq 1 80); do
+    url="$(extract_url)"
+    if [[ -n "$url" ]]; then
+      printf '%s\n' "$url"
+      return 0
+    fi
+    if [[ -s "$TUNNEL_PID_FILE" ]] && ! is_running "$TUNNEL_PID_FILE"; then
+      return 1
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
+wait_for_public_url() {
+  local url="$1"
+  local i
+  for i in $(seq 1 30); do
+    if curl -fsS -m 5 "$url/api/status" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+start_tunnel() {
+  local cloudflared="$1"
+  local attempt url
+
+  : >"$TUNNEL_LOG"
+  for attempt in 1 2 3; do
+    printf '== tunnel attempt %s ==\n' "$attempt" >>"$TUNNEL_LOG"
+    setsid "$cloudflared" tunnel --no-autoupdate --url "http://127.0.0.1:$PORT" >>"$TUNNEL_LOG" 2>&1 < /dev/null &
+    printf '%s\n' "$!" >"$TUNNEL_PID_FILE"
+
+    if url="$(wait_for_tunnel_url)"; then
+      printf '%s\n' "$url"
+      return 0
+    fi
+
+    stop_one "Tunnel" "$TUNNEL_PID_FILE" >/dev/null
+    sleep "$attempt"
+  done
+  return 1
+}
+
+stop_one() {
+  local name="$1"
+  local pid_file="$2"
+
+  if ! is_running "$pid_file"; then
+    rm -f "$pid_file"
+    return
+  fi
+
+  local pid
+  pid="$(cat "$pid_file")"
+  kill "$pid" 2>/dev/null || true
+  for _ in $(seq 1 20); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      rm -f "$pid_file"
+      printf '%s stopped.\n' "$name"
+      return
+    fi
+    sleep 0.15
+  done
+  kill -9 "$pid" 2>/dev/null || true
+  rm -f "$pid_file"
+  printf '%s stopped.\n' "$name"
+}
+
+print_status() {
+  local host_state="stopped"
+  local tunnel_state="stopped"
+  local url=""
+  local password=""
+
+  if is_running "$HOST_PID_FILE"; then
+    host_state="running pid $(cat "$HOST_PID_FILE")"
+  fi
+  if is_running "$TUNNEL_PID_FILE"; then
+    tunnel_state="running pid $(cat "$TUNNEL_PID_FILE")"
+  fi
+  [[ -s "$URL_FILE" ]] && url="$(cat "$URL_FILE")"
+  [[ -s "$PASSWORD_FILE" ]] && password="$(cat "$PASSWORD_FILE")"
+
+  printf 'Host:   %s\n' "$host_state"
+  printf 'Tunnel: %s\n' "$tunnel_state"
+  [[ -n "$url" ]] && printf 'URL:    %s\n' "$url"
+  [[ -n "$password" ]] && printf 'Pass:   %s\n' "$password"
+  return 0
+}
+
+close_remote() {
+  stop_one "Tunnel" "$TUNNEL_PID_FILE"
+  stop_one "Host" "$HOST_PID_FILE"
+  rm -f "$URL_FILE" "$PASSWORD_FILE"
+}
+
+start_remote() {
+  if is_running "$HOST_PID_FILE" && is_running "$TUNNEL_PID_FILE"; then
+    print_status
+    return
+  fi
+
+  close_remote >/dev/null
+
+  if ss -ltn "sport = :$PORT" | grep -q LISTEN; then
+    printf 'Port %s is already in use. Set REMOTE_PORT or close the existing service.\n' "$PORT" >&2
+    exit 1
+  fi
+
+  local cloudflared py url password
+  cloudflared="$(find_cloudflared)" || {
+    printf 'cloudflared not found. Install it first or put it at ~/.local/bin/cloudflared.\n' >&2
+    exit 1
+  }
+  py="$(python_cmd)"
+
+  : >"$HOST_LOG"
+  : >"$TUNNEL_LOG"
+
+  setsid "$py" -u "$PROJECT_DIR/host/server.py" --port "$PORT" >"$HOST_LOG" 2>&1 < /dev/null &
+  printf '%s\n' "$!" >"$HOST_PID_FILE"
+
+  if ! wait_for_host; then
+    printf 'Host failed to start. Recent log:\n' >&2
+    tail -n 40 "$HOST_LOG" >&2 || true
+    close_remote >/dev/null
+    exit 1
+  fi
+
+  password="$(extract_password)"
+  if [[ -z "$password" ]]; then
+    printf 'Host started but password was not found in the log.\n' >&2
+    close_remote >/dev/null
+    exit 1
+  fi
+  printf '%s\n' "$password" >"$PASSWORD_FILE"
+  chmod 600 "$PASSWORD_FILE"
+
+  if ! url="$(start_tunnel "$cloudflared")"; then
+    printf 'Tunnel failed to start. Recent log:\n' >&2
+    tail -n 60 "$TUNNEL_LOG" >&2 || true
+    close_remote >/dev/null
+    exit 1
+  fi
+  printf '%s\n' "$url" >"$URL_FILE"
+
+  printf 'Personal Remote started.\n'
+  printf 'URL:  %s\n' "$url"
+  printf 'Pass: %s\n' "$password"
+  if ! wait_for_public_url "$url"; then
+    printf 'Note: Cloudflare created the URL, but it is not reachable yet. Try again in a few seconds.\n'
+  fi
+  printf 'Stop: remote close\n'
+}
+
+show_logs() {
+  printf '== Host log ==\n'
+  tail -n 80 "$HOST_LOG" 2>/dev/null || true
+  printf '\n== Tunnel log ==\n'
+  tail -n 80 "$TUNNEL_LOG" 2>/dev/null || true
+  return 0
+}
+
+case "${1:-start}" in
+  start)
+    start_remote
+    ;;
+  close|stop)
+    close_remote
+    ;;
+  status)
+    print_status
+    ;;
+  logs|log)
+    show_logs
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

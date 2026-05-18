@@ -75,9 +75,9 @@ async function connect() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ password }),
     });
-    const data = await response.json();
+    const data = await response.json().catch(() => ({}));
     if (!response.ok || !data.ok) {
-      throw new Error("密码错误");
+      throw new Error(loginErrorMessage(data.error));
     }
     token = data.token;
     localStorage.setItem("remoteToken", token);
@@ -88,6 +88,12 @@ async function connect() {
   } finally {
     connectButton.disabled = false;
   }
+}
+
+function loginErrorMessage(error) {
+  if (error === "too_many_attempts") return "尝试太多，请稍后再试";
+  if (error === "bad_password") return "密码错误";
+  return "连接失败";
 }
 
 function disconnect() {

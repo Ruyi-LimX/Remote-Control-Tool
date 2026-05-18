@@ -28,10 +28,15 @@ class HostConfig:
     bind: str
     port: int
     password: str
+    token_ttl: int
     fps: int
     quality: int
     max_width: int
     monitor: int
+
+
+AUTH_FAIL_LIMIT = 8
+AUTH_FAIL_WINDOW_SECONDS = 5 * 60
 
 
 class InputController:
@@ -257,17 +262,47 @@ class HostApp:
     def __init__(self, config: HostConfig) -> None:
         self.config = config
         self.input = InputController()
-        self.tokens: set[str] = set()
+        self.tokens: dict[str, float] = {}
+        self.auth_failures: dict[str, list[float]] = {}
 
     def create_token(self, password: str) -> str | None:
         if not hmac.compare_digest(password, self.config.password):
             return None
         token = secrets.token_urlsafe(32)
-        self.tokens.add(token)
+        self.tokens[token] = time.monotonic() + self.config.token_ttl
         return token
 
     def is_token_valid(self, token: str | None) -> bool:
-        return bool(token and token in self.tokens)
+        if not token:
+            return False
+
+        expires_at = self.tokens.get(token)
+        if expires_at is None:
+            return False
+        if expires_at < time.monotonic():
+            self.tokens.pop(token, None)
+            return False
+        return True
+
+    def is_auth_limited(self, client_key: str) -> bool:
+        return len(self._recent_auth_failures(client_key)) >= AUTH_FAIL_LIMIT
+
+    def record_auth_failure(self, client_key: str) -> None:
+        failures = self._recent_auth_failures(client_key)
+        failures.append(time.monotonic())
+        self.auth_failures[client_key] = failures
+
+    def record_auth_success(self, client_key: str) -> None:
+        self.auth_failures.pop(client_key, None)
+
+    def _recent_auth_failures(self, client_key: str) -> list[float]:
+        cutoff = time.monotonic() - AUTH_FAIL_WINDOW_SECONDS
+        failures = [ts for ts in self.auth_failures.get(client_key, []) if ts >= cutoff]
+        if failures:
+            self.auth_failures[client_key] = failures
+        else:
+            self.auth_failures.pop(client_key, None)
+        return failures
 
     def status(self) -> dict[str, Any]:
         return {
@@ -276,6 +311,7 @@ class HostApp:
             "quality": self.config.quality,
             "maxWidth": self.config.max_width,
             "monitor": self.config.monitor,
+            "tokenTtl": self.config.token_ttl,
             "lanIp": guess_lan_ip(),
         }
 
@@ -323,11 +359,18 @@ class RemoteRequestHandler(BaseHTTPRequestHandler):
         sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), fmt % args))
 
     def _handle_auth(self) -> None:
+        client_key = self._client_key()
+        if self.app.is_auth_limited(client_key):
+            self._send_json({"ok": False, "error": "too_many_attempts"}, HTTPStatus.TOO_MANY_REQUESTS)
+            return
+
         body = self._read_json()
         token = self.app.create_token(str(body.get("password", "")))
         if token is None:
+            self.app.record_auth_failure(client_key)
             self._send_json({"ok": False, "error": "bad_password"}, HTTPStatus.UNAUTHORIZED)
             return
+        self.app.record_auth_success(client_key)
         self._send_json({"ok": True, "token": token, "status": self.app.status()})
 
     def _handle_control(self) -> None:
@@ -500,6 +543,9 @@ class RemoteRequestHandler(BaseHTTPRequestHandler):
             return self.app.is_token_valid(str(body.get("token", "")))
         return False
 
+    def _client_key(self) -> str:
+        return self.client_address[0] if self.client_address else "unknown"
+
     def _send_json(self, payload: dict[str, Any], status: int = HTTPStatus.OK) -> None:
         data = json.dumps(payload).encode("utf-8")
         self.send_response(status)
@@ -537,14 +583,15 @@ def guess_lan_ip() -> str:
 
 
 def random_password() -> str:
-    return str(secrets.randbelow(900000) + 100000)
+    return secrets.token_urlsafe(18)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Personal Android-to-PC remote control host")
-    parser.add_argument("--bind", default="0.0.0.0", help="address to bind, default: 0.0.0.0")
+    parser.add_argument("--bind", default="127.0.0.1", help="address to bind, default: 127.0.0.1")
     parser.add_argument("--port", type=int, default=7070, help="port to listen on, default: 7070")
     parser.add_argument("--password", default=os.getenv("REMOTE_PASSWORD"), help="access password")
+    parser.add_argument("--token-ttl", type=int, default=12 * 60 * 60, help="token lifetime in seconds")
     parser.add_argument("--fps", type=int, default=12, help="screen stream frames per second")
     parser.add_argument("--quality", type=int, default=70, help="JPEG quality, 1-95")
     parser.add_argument("--max-width", type=int, default=1280, help="resize stream width, 0 disables")
@@ -559,6 +606,7 @@ def main() -> None:
         bind=args.bind,
         port=args.port,
         password=password,
+        token_ttl=max(60, args.token_ttl),
         fps=max(1, args.fps),
         quality=min(95, max(1, args.quality)),
         max_width=max(0, args.max_width),
@@ -567,10 +615,14 @@ def main() -> None:
     app = HostApp(config)
     server = RemoteHTTPServer((config.bind, config.port), RemoteRequestHandler, app)
 
-    lan_ip = guess_lan_ip()
     print("Personal Remote Host")
-    print(f"URL:      http://{lan_ip}:{config.port}")
-    print(f"Password: {password}")
+    print(f"Bind:      {config.bind}:{config.port}")
+    print(f"Local URL: http://127.0.0.1:{config.port}")
+    if config.bind not in {"127.0.0.1", "localhost"}:
+        print(f"LAN URL:   http://{guess_lan_ip()}:{config.port}")
+    print(f"Password:  {password}")
+    print(f"Token TTL: {config.token_ttl}s")
+    print(f"Tunnel:    cloudflared tunnel --url http://127.0.0.1:{config.port}")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()
